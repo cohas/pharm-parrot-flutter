@@ -1,6 +1,6 @@
 ﻿// MainScreen.dart
 //
-// [�˸�] �� ��Ʈ(MaterialApp)�� ��Ķ ��������Ʈ�� �߰��ϼ���.
+// [알림] 앱 루트(MaterialApp)에 로컬 로컬리제이션을 추가하세요.
 // import 'package:flutter_localizations/flutter_localizations.dart';
 // return MaterialApp(
 //   localizationsDelegates: const [
@@ -14,12 +14,15 @@
 
 import 'dart:async';
 import 'dart:math';
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/supabase_service.dart';
 import '../services/native_tts_service.dart';
+import '../services/com_port_service.dart';
 import '../widgets/patient_drug_dialog.dart';
 
 num asNum(dynamic v, [num def = 0]) {
@@ -50,10 +53,10 @@ String fmtNum(num v) {
 }
 
 enum PageDesignMode {
-  basic,        // �⺻
-  modern,       // ���
-  contrast,     // ���
-  highContrast  // ����
+  basic,        // 기본
+  modern,       // 모던
+  contrast,     // 고대비
+  highContrast  // 최고대비
 }
 
 class MainScreen extends StatefulWidget {
@@ -68,6 +71,7 @@ class _MainScreenState extends State<MainScreen> {
   final FocusNode _barcodeFocusNode = FocusNode();
   final NativeTtsService _tts = NativeTtsService();
   final ScrollController _scrollController = ScrollController();
+  late final ComPortService _comPortService;
 
   static const double kTabletBreakpoint = 768.0;
   static const double kDesktopBreakpoint = 1024.0;
@@ -91,12 +95,17 @@ class _MainScreenState extends State<MainScreen> {
   int _selectedSeparation = 0; // 0 means none
 
   PageDesignMode _pageDesignMode = PageDesignMode.basic;
+  
+  // COM Port 설정
+  bool _useComPort = true;
+  int _selectedComPort = 4; // 기본값: COM4
 
   @override
   void initState() {
     super.initState();
     _sb = SupabaseService(Supabase.instance.client);
-    unawaited(_loadByDate(_selectedDate));
+    
+    unawaited(_initialize());
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _barcodeFocusNode.requestFocus();
@@ -115,6 +124,7 @@ class _MainScreenState extends State<MainScreen> {
     _barcodeController.dispose();
     _barcodeFocusNode.dispose();
     _scrollController.dispose();
+    _comPortService.dispose();
     super.dispose();
   }
 
@@ -134,7 +144,7 @@ class _MainScreenState extends State<MainScreen> {
     });
   }
 
-  // ��¥ ���� ���̾�α�(���� CalendarDatePicker)
+  // 날짜 선택 다이얼로그(직접 CalendarDatePicker)
   Future<void> _pickDateFix() async {
     await showDialog<DateTime>(
       context: context,
@@ -191,13 +201,13 @@ class _MainScreenState extends State<MainScreen> {
       });
 
       if (_rxHeads.isNotEmpty) {
-        _onHeadSelected(_rxHeads.first);
-        _setResult('ó�� ${_rxHeads.length}�� �ε� �Ϸ� ($d).');
+        onHeadSelected(_rxHeads.first);
+        _setResult('처방 ${_rxHeads.length}건 로드 완료 ($d).');
       } else {
-        _setResult('�ش� ��¥($d)�� ó���� �����ϴ�.');
+        _setResult('해당 날짜($d)의 처방이 없습니다.');
       }
     } catch (e) {
-      _setResult('RxHead ��ȸ ����: $e', error: true);
+      _setResult('RxHead 조회 실패: $e', error: true);
     }
   }
 
@@ -213,13 +223,13 @@ class _MainScreenState extends State<MainScreen> {
         _rxRecipes = [];
       });
       if (_rxHeads.isNotEmpty) {
-        _onHeadSelected(_rxHeads.first);
-        _setResult('�̸�($q)���� ${_rxHeads.length}��.');
+        onHeadSelected(_rxHeads.first);
+        _setResult('이름($q)으로 ${_rxHeads.length}건.');
       } else {
-        _setResult('�̸�($q) ��ȸ ��� ����.');
+        _setResult('이름($q) 조회 결과 없음.');
       }
     } catch (e) {
-      _setResult('�̸����� RxHead ��ȸ ����: $e', error: true);
+      _setResult('이름으로 RxHead 조회 실패: $e', error: true);
     }
   }
 
@@ -234,40 +244,40 @@ class _MainScreenState extends State<MainScreen> {
       _refreshSeparationOptions();
       _barcodeFocusNode.requestFocus();
     } catch (e) {
-      _setResult('RxRecipe ��ȸ ����: $e', error: true);
+      _setResult('RxRecipe 조회 실패: $e', error: true);
     }
   }
 
-  // ���º� ���� - ������ ���ο� ������
+  // 상태별 색상 - 디자인 모드에 따라 변경
   Color _statusColor(int checked, int total) {
     switch (_pageDesignMode) {
       case PageDesignMode.basic:
-        // �⺻: �ε巯�� �Ľ���
-        if (checked > total) return const Color(0xFFFFE0B2); // ���� ������
-        if (checked == total) return const Color(0xFFC8E6C9); // ���� ���
-        if (checked >= 1) return const Color(0xFFBBDEFB); // ���� �Ķ�
-        return const Color(0xFFF5F5F5); // ���� ���
+        // 기본: 은은하고 부드러운
+        if (checked > total) return const Color(0xFFFFE0B2); // 연한 주황색
+        if (checked == total) return const Color(0xFFC8E6C9); // 연한 녹색
+        if (checked >= 1) return const Color(0xFFBBDEFB); // 연한 파란색
+        return const Color(0xFFF5F5F5); // 연한 회색
       
       case PageDesignMode.modern:
-        // ���: ���õ� �׶��̼� ����
-        if (checked > total) return const Color(0xFFFF9800); // �������ִ� ������
-        if (checked == total) return const Color(0xFF66BB6A); // �ż��� ���
-        if (checked >= 1) return const Color(0xFF42A5F5); // ������ �Ķ�
-        return const Color(0xFFECEFF1); // ������ ȸ��
+        // 모던: 세련된 그라데이션 느낌
+        if (checked > total) return const Color(0xFFFF9800); // 선명하지만은 주황색
+        if (checked == total) return const Color(0xFF66BB6A); // 부드러운 녹색
+        if (checked >= 1) return const Color(0xFF42A5F5); // 밝은 파란색
+        return const Color(0xFFECEFF1); // 밝은 회색
       
       case PageDesignMode.contrast:
-        // ���: ��Ȯ�� ����
-        if (checked > total) return const Color(0xFFFF6F00); // ���� ������
-        if (checked == total) return const Color(0xFF43A047); // ���� ���
-        if (checked >= 1) return const Color(0xFF1E88E5); // ���� �Ķ�
-        return const Color(0xFFE0E0E0); // �߰� ȸ��
+        // 고대비: 명확한 구분
+        if (checked > total) return const Color(0xFFFF6F00); // 진한 주황색
+        if (checked == total) return const Color(0xFF43A047); // 진한 녹색
+        if (checked >= 1) return const Color(0xFF1E88E5); // 진한 파란색
+        return const Color(0xFFE0E0E0); // 중간 회색
       
       case PageDesignMode.highContrast:
-        // ����: �ִ� ���μ�
-        if (checked > total) return const Color(0xFFE65100); // �ſ� ���� ������
-        if (checked == total) return const Color(0xFF2E7D32); // �ſ� ���� ���
-        if (checked >= 1) return const Color(0xFF1565C0); // �ſ� ���� �Ķ�
-        return const Color(0xFF424242); // ���� ȸ��
+        // 최고대비: 최대 가시성
+        if (checked > total) return const Color(0xFFE65100); // 매우 진한 주황색
+        if (checked == total) return const Color(0xFF2E7D32); // 매우 진한 녹색
+        if (checked >= 1) return const Color(0xFF1565C0); // 매우 진한 파란색
+        return const Color(0xFF424242); // 어두운 회색
     }
   }
 
@@ -355,169 +365,242 @@ class _MainScreenState extends State<MainScreen> {
   }
 
 
-  Future<void> _handleBarcode(String input) async {
-    var inputBarcode = input.trim().replaceAll('(', '').replaceAll(')', '');
-    if (inputBarcode.isEmpty) return;
-    if (inputBarcode.length >= 4 &&
-        inputBarcode.toLowerCase().startsWith('http')) return;
-    if (inputBarcode.length < 13) return;
+  Future<void> handleBarcode(String input) async {
+  // 0) 기본 가드
+  var inputBarcode = input.trim().replaceAll('(', '').replaceAll(')', '');
+  if (inputBarcode.isEmpty) return;
+  if (inputBarcode.length >= 4 && inputBarcode.toLowerCase().startsWith('http')) return;
+  if (inputBarcode.length < 13) return;
 
-    // 1) ����ȭ
-    final raw = inputBarcode;
-    String baseBarcode;
-    String packSerial = '';
-    if (raw.length >= 16) {
-      baseBarcode = raw.substring(3, 16);
-      packSerial = raw.substring(16);
+  // 1) 바코드 정규화
+  final raw = inputBarcode;
+  String baseBarcode;
+  String packSerial = '';
+
+  // C#: if (raw.Length >= 16) { base = raw.Substring(3, 13); pack = raw.Substring(16); } else base = raw;
+  if (raw.length >= 16) {
+    // substring(start, endExclusive) 이므로 3..15(포함) → end=16
+    baseBarcode = raw.substring(3, 16);
+    packSerial = raw.substring(16);
+  } else {
+    baseBarcode = raw;
+  }
+
+  // 2) 포장 단위(unit) 조회
+  num unitDecimal = 1;
+  try {
+    final unitResp = await _sb.rpc('get_unit_from_pack_barcode', {'_pack_barcode': baseBarcode});
+    final unitStr = unitResp?.toString().trim();
+    if (unitStr != null && unitStr.isNotEmpty) {
+      final parsed = num.tryParse(unitStr);
+      if (parsed != null) unitDecimal = parsed;
+    }
+  } catch (_) {
+    unitDecimal = 1;
+  }
+  final int delta = max(1, unitDecimal.round());
+
+  // 3) RxRecipes에서 바코드 매칭
+  // 요구사항 반영: type == 'E'는 12자리, 그 외(정제 T)는 11자리 비교
+  final candidates = _rxRecipes.where((r) {
+    final code = (r['pack_barcode'] ?? '').toString().trim();
+    final t = (r['type'] ?? r['T'] ?? r['typeCode'] ?? '').toString().trim().toUpperCase();
+    if (code.isEmpty) return false;
+
+    if (t == 'E') {
+      if (baseBarcode.length < 12 || code.length < 12) return false;
+      return code.substring(0, 12) == baseBarcode.substring(0, 12);
     } else {
-      baseBarcode = raw;
+      final key11 = baseBarcode.length >= 11 ? baseBarcode.substring(0, 11) : baseBarcode;
+      return code.length >= 11 && code.substring(0, 11) == key11;
     }
+  }).toList();
 
-    // 2) ���� ��ȸ
-    num unitDecimal = 1;
+  if (candidates.isEmpty) {
+    await _tts.beep(1600, 1200);
+    _setResult('바코드 매칭 실패: 일치하는 약품이 없습니다.', error: true);
+
+    // 미스매치 후보 보여주기 (C#과 동일)
     try {
-      final unitResp = await _sb
-          .rpc('get_unit_from_pack_barcode', {'_pack_barcode': baseBarcode});
-      final unitStr = unitResp?.toString().trim();
-      if (unitStr != null && unitStr.isNotEmpty) {
-        unitDecimal = num.tryParse(unitStr) ?? 1;
-      }
-    } catch (_) {
-      unitDecimal = 1;
-    }
-    int delta = max(1, unitDecimal.round());
-
-    // 3) �ĺ� ��Ī (T=11�ڸ�, E=12�ڸ�)
-    final candidates = _rxRecipes.where((r) {
-      final code = (r['pack_barcode'] ?? '').toString().trim();
-      final t = (r['type'] ?? '').toString().trim().toUpperCase();
-      if (code.isEmpty) return false;
-
-      if (t == 'E') {
-        if (baseBarcode.length < 12 || code.length < 12) return false;
-        return code.substring(0, 12) == baseBarcode.substring(0, 12);
-      } else {
-        final key11 =
-            baseBarcode.length >= 11 ? baseBarcode.substring(0, 11) : baseBarcode;
-        return code.length >= 11 && code.substring(0, 11) == key11;
-      }
-    }).toList();
-
-    if (candidates.isEmpty) {
-      await _tts.beep(1600, 1200);
-      _setResult('���ڵ� ��Ī ����: ��ġ�ϴ� ��ǰ�� �����ϴ�.', error: true);
-      try {
-        final mm =
-            await _sb.rpc('get_miss_mached_drug', {'_pack_barcode': baseBarcode});
-        if (mm != null) {
-          for (final item in (mm as List? ?? [])) {
-            final productName = item['product_name']?.toString() ?? '';
-            final location = item['location']?.toString() ?? '';
-            _setResult('$productName\n��ġ: $location');
+      final mm = await _sb.rpc('get_miss_mached_drug', {'_pack_barcode': baseBarcode});
+      // 서버가 JSON 배열을 문자열로 줄 수도/이미 List로 줄 수도 있으니 방어적으로 처리
+      if (mm != null) {
+        final list = (mm is List) ? mm : [];
+        for (final item in list) {
+          final productName = item['product_name']?.toString() ?? '';
+          final location = item['location']?.toString() ?? '';
+          if (productName.isNotEmpty) {
+            _setResult('$productName\n위치: $location');
           }
         }
-      } catch (e) {
-        _setResult('�̽���ġ ��ǰ ���� �Ľ� ����: $e');
       }
-      return;
-    }
-
-    // 4) Ÿ�� ����(�̿Ϸ� �켱)
-    var target = candidates.reduce((a, b) {
-      final aChecked = asNum(a['checked_amount']);
-      final aTotal = asNum(a['total']);
-      final bChecked = asNum(b['checked_amount']);
-      final bTotal = asNum(b['total']);
-      final aNotComplete = aChecked < aTotal;
-      final bNotComplete = bChecked < bTotal;
-      if (aNotComplete && !bNotComplete) return a;
-      if (!aNotComplete && bNotComplete) return b;
-      return a;
-    });
-
-    final rxrecipeId = asNum(target['rxrecipe_id']);
-    if (rxrecipeId <= 0) {
-      await _tts.beep(1500, 1200);
-      _setResult('���ڵ� ó�� ����: ���� �׸��� rxrecipe_id ����.', error: true);
-      return;
-    }
-
-    // ���� beep
-    await _tts.beep(500, 500);
-
-    final drugName =
-        (target['product_name'] ?? '').toString().split(RegExp(r'[_(]'))[0];
-    final drugType = (target['type'] ?? '').toString().trim();
-
-    // 5) TTS �ȳ�
-    final dose = asNum(target['dose']);
-    final times = asNum(target['times']);
-    final days = asNum(target['days']);
-    final each = (dose * times * days).round();
-    
-    if (drugType == 'E') {
-      await _speak('$drugName, $each��');
-    } else {
-      await _speak('$drugName, $dose��, $timesȸ, $days��, �� $each��');
-    }
-
-    // 6) DB �ݿ�
-    try {
-      final incResp = await _sb.rpc('update_checked_amount_and_packserial', {
-        '_rxrecipe_id': rxrecipeId,
-        '_delta': delta,
-        '_pack_serial': packSerial
-      });
-
-      int affected = 0;
-      if (incResp != null) {
-        affected = int.tryParse(incResp.toString().trim()) ?? 0;
-      }
-
-      // [1] �ߺ� ó�� (affected = 0)
-      if (affected == 0) {
-        await _tts.beep(900, 300);
-        await _speak('�ߺ��� ���ڵ��Դϴ�');
-        _setResult('[�ߺ�] �̹� ó���� ���ڵ��Դϴ�. ($drugName)', error: true);
-        return;
-      }
-
-      // [2] DB�� ���������Ƿ� UI ������Ʈ
-      final checkedNow = asNum(target['checked_amount']);
-      final totalVal = asNum(target['total']);
-      final newChecked = max(0, min(32767, (checkedNow + delta).round()));
-      target['checked_amount'] = newChecked;
-      setState(() {});
-
-      // [3] packSerial�� ���� ���� �ʰ� �� ���
-      if (packSerial.isEmpty && newChecked >= totalVal) {
-        await _tts.beep(1000, 1200);
-        _setResult('[����] $drugName �̹� $newChecked/$totalVal�� �Ϸ��.', error: true);
-        return;
-      }
-
-      // [4] ���� �Ϸ� �޽���
-      _setResult('üũ �Ϸ�: $drugName +$delta (���� $newChecked/$totalVal)');
     } catch (e) {
-      await _tts.beep(1500, 900);
-      _setResult('üũ ���� ���� ����: $e', error: true);
+      _setResult('미스매치 약품 정보 파싱 오류: $e');
     }
+    return;
   }
 
-  void _onHeadSelected(dynamic row) {
-    setState(() {
-      _selectedHead = row;
-    });
-    
-    // ȯ�� �̸� �о��ֱ�
-    final patientName = (row['patient_name'] ?? row['name'] ?? row['ȯ�ڸ�'] ?? '').toString();
-    if (patientName.isNotEmpty) {
-      unawaited(_speak(patientName));
-    }
-    
-    final tfn = asNum(row['tfn']);
-    unawaited(_loadRecipesByTfn(tfn));
+  // 4) 타겟 선택: "완료되지 않은 항목"이 우선 (C#의 OrderBy(notComplete ? 0 : 1)와 동등)
+  Map<String, dynamic> target = candidates.reduce((a, b) {
+    final aChecked = asNum(a['checked_amount'] ?? a['Checked']);
+    final aTotal   = asNum(a['total'] ?? a['Total']);
+    final bChecked = asNum(b['checked_amount'] ?? b['Checked']);
+    final bTotal   = asNum(b['total'] ?? b['Total']);
+
+    final aNotComplete = aChecked < aTotal;
+    final bNotComplete = bChecked < bTotal;
+
+    if (aNotComplete && !bNotComplete) return a;
+    if (!aNotComplete && bNotComplete) return b;
+    return a; // 동률이면 a 유지(첫 번째 것)
+  });
+
+  // rxrecipe_id 보정(C#은 여러 키 시도)
+  num rxrecipeId = asNum(target['rxrecipe_id']);
+  if (rxrecipeId <= 0) rxrecipeId = asNum(target['rxRecipeID']);
+  if (rxrecipeId <= 0) rxrecipeId = asNum(target['RxRecipeId']);
+
+  if (rxrecipeId <= 0) {
+    await _tts.beep(1500, 1200);
+    _setResult('바코드 처리 실패: 선택된 항목의 rxrecipe_id를 찾을 수 없습니다.', error: true);
+    return;
   }
+
+  // 5) 성공 beep + TTS
+  await _tts.beep(500, 500);
+
+  final rawDrugName = (target['product_name'] ??
+      target['약품명'] ??
+      target['name'] ??
+      '').toString();
+  final drugName = rawDrugName.split(RegExp(r'[_(]')).first;
+  final drugType = (target['type'] ?? target['T'] ?? '').toString().trim().toUpperCase();
+
+  final dose  = asNum(target['dose'] ?? target['용량']);
+  final times = asNum(target['times'] ?? target['횟수']);
+  final days  = asNum(target['days'] ?? target['일수']);
+
+  // C#: each = Math.Round(dose * times * days, 1, AwayFromZero)
+  final num eachRaw = dose * times * days;
+  final String eachOneDecimal = (eachRaw is double || eachRaw is int)
+      ? (eachRaw.toDouble()).toStringAsFixed(1)
+      : eachRaw.toString();
+
+  if (drugType == 'E') {
+    // C#은 "개!"로 읽음
+    await _speak('$drugName, $eachOneDecimal개!');
+  } else {
+    await _speak('$drugName, ${fmtNum(dose)}정, ${fmtNum(times)}회, ${fmtNum(days)}일, 총 $eachOneDecimal개');
+  }
+
+  // 6) DB: checked_amount 증가
+  try {
+    final incResp = await _sb.rpc('update_checked_amount_and_packserial', {
+      '_rxrecipe_id': rxrecipeId,
+      '_delta': delta,
+      '_pack_serial': packSerial,
+    });
+
+    int affected = 0;
+    if (incResp != null) {
+      affected = int.tryParse(incResp.toString().trim().replaceAll('"', '')) ?? 0;
+    }
+
+    // [1] 중복 처리 (affected == 0)
+    if (affected == 0) {
+      await _tts.beep(900, 300);
+      // 음성 피드백(선택)
+      await _speak('중복된 바코드입니다');
+      _setResult('[중복] 이미 처리된 바코드입니다. ($drugName)', error: true);
+      return;
+    }
+
+  // 현재 수치 읽기
+  final checkedNow = asNum(target['checked_amount'] ?? target['Checked']);
+  final totalVal   = asNum(target['total'] ?? target['Total']);
+  // 제한 판단은 증가 전 상태로 결정: 이미 완료 상태였다면 이후 스캔은 제한으로 표시
+  final bool wasCompleteBefore = packSerial.isEmpty && checkedNow >= totalVal;
+
+  // [2] 정상 증가 처리 (UI 반영) - DB가 업데이트되었으므로 UI도 반영
+  final int newChecked = max(0, min(32767, checkedNow.round() + affected));
+    // 서로 다른 키 가능성 대응
+    if (target.containsKey('checked_amount')) {
+      target['checked_amount'] = newChecked;
+    } else {
+      target['Checked'] = newChecked;
+    }
+
+    // UI 갱신
+    setState(() {});
+
+    // [3] packSerial이 없는 경우: 증가 전 이미 전량 완료였다면 경고 메시지 표시 (UI는 이미 업데이트됨)
+    if (wasCompleteBefore) {
+      await _tts.beep(1000, 400);
+      _setResult('[제한] $drugName 이미 ${fmtNum(newChecked)}/${fmtNum(totalVal)}개 완료됨.', error: true);
+      return;
+    }
+
+    // [4] 정상 완료 메시지
+    _setResult('체크 완료: $drugName +$delta (현재 ${fmtNum(newChecked)}/${fmtNum(totalVal)})');
+  } catch (e) {
+    await _tts.beep(1500, 900);
+    _setResult('체크 수량 증가 실패: $e', error: true);
+  }
+}
+
+// --- 선택 영역 변경 시 환자명 TTS 및 로딩 (C# OnHeadSelected 대응) -------------
+void onHeadSelected(dynamic row) {
+  setState(() {
+    _selectedHead = row;
+  });
+
+  final patientName = (row['patient_name'] ?? row['name'] ?? row['환자명'] ?? '').toString();
+  if (patientName.isNotEmpty) {
+    // 환자명 읽기
+    _speak(patientName);
+  }
+
+  final tfn = asNum(row['tfn']);
+  _loadRecipesByTfn(tfn);
+}
+
+// --- C# RecalcDispenseTotals와 동등한 합계 계산 ------------------------------
+Map<String, String> calculateTotals(int selectedSeparation) {
+  num m = 0, a = 0, e = 0, n = 0;
+
+  for (final it in _rxRecipes) {
+    if (!asBool(it['use'], true)) continue;
+    final sep = asNum(it['separate'], -999).toInt();
+    if (selectedSeparation != 0 && sep != selectedSeparation) continue;
+
+    final typeCode = (it['type']?.toString() ?? it['T']?.toString() ?? '').trim().toUpperCase();
+    final isPill = typeCode == 'T';
+
+    num vm = asNum(it['morning']);
+    num va = asNum(it['afternoon']);
+    num ve = asNum(it['evening']);
+    num vn = asNum(it['night']);
+
+    if (isPill) {
+      vm = vm.ceil();
+      va = va.ceil();
+      ve = ve.ceil();
+      vn = vn.ceil();
+    }
+
+    m += vm;
+    a += va;
+    e += ve;
+    n += vn;
+  }
+
+  return {
+    'm': fmtNum(m),
+    'a': fmtNum(a),
+    'e': fmtNum(e),
+    'n': fmtNum(n),
+  };
+}
 
   void _refreshSeparationOptions() {
     _separationOptions
@@ -525,7 +608,7 @@ class _MainScreenState extends State<MainScreen> {
       ..addAll(
         _rxRecipes
             .where((e) => asBool(e['use'], false))
-            .map((e) => asNum(e['seperate'], -999).toInt())
+            .map((e) => asNum(e['separate'], -999).toInt())
             .where((v) => v != -999)
             .toSet()
             .toList()
@@ -537,39 +620,6 @@ class _MainScreenState extends State<MainScreen> {
     } else if (!_separationOptions.contains(_selectedSeparation)) {
       _selectedSeparation = _separationOptions.first;
     }
-  }
-
-  Map<String, String> _calculateTotals() {
-    num m = 0, a = 0, e = 0, n = 0;
-    for (final it in _rxRecipes) {
-      if (!asBool(it['use'], true)) continue;
-      if (_selectedSeparation != 0 &&
-          asNum(it['seperate'], -999).toInt() != _selectedSeparation) continue;
-
-      final typeCode = (it['type']?.toString() ?? '').trim();
-      final isPill = typeCode.toUpperCase() == 'T';
-
-      num vm = asNum(it['morning']);
-      num va = asNum(it['afternoon']);
-      num ve = asNum(it['evening']);
-      num vn = asNum(it['night']);
-      if (isPill) {
-        vm = vm.ceil();
-        va = va.ceil();
-        ve = ve.ceil();
-        vn = vn.ceil();
-      }
-      m += vm;
-      a += va;
-      e += ve;
-      n += vn;
-    }
-    return {
-      'm': fmtNum(m),
-      'a': fmtNum(a),
-      'e': fmtNum(e),
-      'n': fmtNum(n),
-    };
   }
 
   Widget _buildKeyValueChips(Map<String, dynamic> data) {
@@ -596,41 +646,44 @@ class _MainScreenState extends State<MainScreen> {
           if (data.containsKey(item['key'] as String))
             Padding(
               padding: const EdgeInsets.only(right: 12),
-              child: Container(
-                width: 42,
-                padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 2),
-                decoration: BoxDecoration(
-                  color: (item['key'] == 'dose')
-                      ? getDoseColor(asNum(data['dose']))
-                      : Colors.grey.shade100,
-                  border: Border.all(color: Colors.grey.shade300),
-                  borderRadius: BorderRadius.circular(3),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      item['label'] as String,
-                      style: const TextStyle(
-                        fontSize: 12,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // 라벨
+                  Text(
+                    item['label'] as String,
+                    style: TextStyle(
+                      fontSize: 9,
+                      color: _pageDesignMode == PageDesignMode.highContrast 
+                          ? Colors.white 
+                          : Colors.black54,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  // 값
+                  Container(
+                    width: 42,
+                    height: 20,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: (item['key'] == 'dose')
+                          ? getDoseColor(asNum(data[item['key']]))
+                          : Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      fmtNum(asNum(data[item['key']])),
+                      style: TextStyle(
+                        fontSize: 11,
                         fontWeight: FontWeight.bold,
-                        color: Colors.black54,
-                        height: 1.0,
+                        color: (item['key'] == 'dose' && asNum(data[item['key']]) >= 2)
+                            ? Colors.white
+                            : Colors.black87,
                       ),
                     ),
-                    const SizedBox(height: 1),
-                    Text(
-                      '${data[item['key'] as String] ?? ''}',
-                      style: const TextStyle(
-                        fontSize: 14,
-                        height: 1.1,
-                        fontWeight: FontWeight.w500,
-                      ),
-                      textAlign: TextAlign.center,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
       ],
@@ -638,104 +691,226 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   Future<void> _showSettingsDialog() async {
+    // 다이얼로그용 임시 변수
+    int tempComPort = _selectedComPort;
+    bool tempUseComPort = _useComPort;
+    PageDesignMode tempDesignMode = _pageDesignMode;
+    
     await showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('����'),
-        content: SizedBox(
-          width: 400,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                '������ ������',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('설정'),
+          content: SizedBox(
+            width: 400,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    '화면 디자인 모드',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 16),
+                  RadioListTile<PageDesignMode>(
+                    title: const Text('기본'),
+                    subtitle: const Text('은은하고 부드러운 느낌'),
+                    value: PageDesignMode.basic,
+                    groupValue: tempDesignMode,
+                    onChanged: (val) {
+                      if (val != null) {
+                        setDialogState(() => tempDesignMode = val);
+                      }
+                    },
+                  ),
+                  RadioListTile<PageDesignMode>(
+                    title: const Text('모던'),
+                    subtitle: const Text('세련되고 현대적인 느낌'),
+                    value: PageDesignMode.modern,
+                    groupValue: tempDesignMode,
+                    onChanged: (val) {
+                      if (val != null) {
+                        setDialogState(() => tempDesignMode = val);
+                      }
+                    },
+                  ),
+                  RadioListTile<PageDesignMode>(
+                    title: const Text('고대비'),
+                    subtitle: const Text('명확한 구분과 강한 색상'),
+                    value: PageDesignMode.contrast,
+                    groupValue: tempDesignMode,
+                    onChanged: (val) {
+                      if (val != null) {
+                        setDialogState(() => tempDesignMode = val);
+                      }
+                    },
+                  ),
+                  RadioListTile<PageDesignMode>(
+                    title: const Text('최고대비'),
+                    subtitle: const Text('최대 가시성과 접근성'),
+                    value: PageDesignMode.highContrast,
+                    groupValue: tempDesignMode,
+                    onChanged: (val) {
+                      if (val != null) {
+                        setDialogState(() => tempDesignMode = val);
+                      }
+                    },
+                  ),
+                  const Divider(height: 32),
+                  const Text(
+                    'COM Port 설정 (Windows)',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 16),
+                  SwitchListTile(
+                    title: const Text('COM Port 사용'),
+                    subtitle: const Text('바코드 스캐너를 COM Port로 연결'),
+                    value: tempUseComPort,
+                    onChanged: (val) {
+                      setDialogState(() {
+                        tempUseComPort = val;
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Row(
+                      children: [
+                        const Text('COM Port 번호:', style: TextStyle(fontSize: 14)),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: DropdownButton<int>(
+                            value: tempComPort,
+                            isExpanded: true,
+                            items: List.generate(20, (i) => i + 1)
+                                .map((port) => DropdownMenuItem(
+                                      value: port,
+                                      child: Text('COM$port'),
+                                    ))
+                                .toList(),
+                            onChanged: tempUseComPort ? (val) {
+                              if (val != null) {
+                                setDialogState(() {
+                                  tempComPort = val;
+                                });
+                              }
+                            } : null,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: 16),
-              RadioListTile<PageDesignMode>(
-                title: const Text('�⺻'),
-                subtitle: const Text('�ε巯�� �Ľ��� ����'),
-                value: PageDesignMode.basic,
-                groupValue: _pageDesignMode,
-                onChanged: (val) {
-                  if (val != null) {
-                    setState(() => _pageDesignMode = val);
-                    Navigator.of(ctx).pop();
-                  }
-                },
-              ),
-              RadioListTile<PageDesignMode>(
-                title: const Text('���'),
-                subtitle: const Text('���õǰ� ������ �ִ� ����'),
-                value: PageDesignMode.modern,
-                groupValue: _pageDesignMode,
-                onChanged: (val) {
-                  if (val != null) {
-                    setState(() => _pageDesignMode = val);
-                    Navigator.of(ctx).pop();
-                  }
-                },
-              ),
-              RadioListTile<PageDesignMode>(
-                title: const Text('���'),
-                subtitle: const Text('��Ȯ�� ���а� �߰� ���'),
-                value: PageDesignMode.contrast,
-                groupValue: _pageDesignMode,
-                onChanged: (val) {
-                  if (val != null) {
-                    setState(() => _pageDesignMode = val);
-                    Navigator.of(ctx).pop();
-                  }
-                },
-              ),
-              RadioListTile<PageDesignMode>(
-                title: const Text('����'),
-                subtitle: const Text('�ִ� ���μ��� ���� ���'),
-                value: PageDesignMode.highContrast,
-                groupValue: _pageDesignMode,
-                onChanged: (val) {
-                  if (val != null) {
-                    setState(() => _pageDesignMode = val);
-                    Navigator.of(ctx).pop();
-                  }
-                },
-              ),
-            ],
+            ),
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('취소'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                // 설정 저장
+                setState(() {
+                  _selectedComPort = tempComPort;
+                  _useComPort = tempUseComPort;
+                  _pageDesignMode = tempDesignMode;
+                });
+                
+                // 디스크에 설정 저장
+                _saveSettings();
+
+                // COM Port 설정 업데이트
+                _comPortService.updateSettings(
+                  useComPort: tempUseComPort,
+                  comPortNumber: tempComPort,
+                );
+                
+                Navigator.of(ctx).pop();
+              },
+              child: const Text('저장'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('�ݱ�'),
-          ),
-        ],
       ),
     );
   }
 
+  Future<void> _initialize() async {
+    await _loadSettings();
+
+    // COM Port 서비스 초기화
+    _comPortService = ComPortService(
+      useComPort: _useComPort,
+      comPortNumber: _selectedComPort,
+      onBarcodeReceived: (barcode) {
+        // COM Port에서 수신된 원본 데이터 표시
+        _setResult('COM Port: $barcode');
+        // 잠시 후 바코드 처리 시작
+        Future.delayed(const Duration(milliseconds: 500), () {
+          handleBarcode(barcode);
+        });
+      },
+    );
+    
+    // Windows 플랫폼이면 COM Port 자동 연결 시도
+    if (Platform.isWindows && _useComPort) {
+      _comPortService.connect();
+    }
+    
+    await _loadByDate(_selectedDate);
+  }
+
+  Future<void> _loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _useComPort = prefs.getBool('useComPort') ?? true;
+      _selectedComPort = prefs.getInt('selectedComPort') ?? 4;
+      final designModeName = prefs.getString('pageDesignMode');
+      _pageDesignMode = PageDesignMode.values.firstWhere(
+        (e) => e.name == designModeName,
+        orElse: () => PageDesignMode.basic,
+      );
+    });
+  }
+
+  Future<void> _saveSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('useComPort', _useComPort);
+    await prefs.setInt('selectedComPort', _selectedComPort);
+    await prefs.setString('pageDesignMode', _pageDesignMode.name);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final totals = _calculateTotals();
+    final totals = calculateTotals(_selectedSeparation);
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('PharmParrot'),
-        backgroundColor: _getAppBarColor(),
-        foregroundColor: Colors.white,
-        elevation: _pageDesignMode == PageDesignMode.modern ? 0 : 4,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.settings),
-            onPressed: _showSettingsDialog,
-            tooltip: '����',
-          ),
-        ],
-      ),
-      body: SafeArea(
+    return GestureDetector(
+      onTap: () {
+        // 화면 아무곳이나 터치하면 바코드 입력창에 포커스
+        _barcodeFocusNode.requestFocus();
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('PharmParrot'),
+          backgroundColor: _getAppBarColor(),
+          foregroundColor: Colors.white,
+          elevation: _pageDesignMode == PageDesignMode.modern ? 0 : 4,
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.settings),
+              onPressed: _showSettingsDialog,
+              tooltip: '설정',
+            ),
+          ],
+        ),
+        body: SafeArea(
         child: Column(
           children: [
-            // ��� ����(����)
+            // 상단 검색(날짜)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               child: Row(
@@ -769,7 +944,7 @@ class _MainScreenState extends State<MainScreen> {
                             minimumSize: const Size(60, 48),
                             padding: const EdgeInsets.symmetric(horizontal: 12),
                           ),
-                          child: const Text('����'),
+                          child: const Text('오늘'),
                         ),
                       ],
                     ),
@@ -779,7 +954,7 @@ class _MainScreenState extends State<MainScreen> {
                     child: TextField(
                       decoration: const InputDecoration(
                         border: OutlineInputBorder(),
-                        labelText: '�̸�',
+                        labelText: '이름',
                         isDense: true,
                       ),
                       onChanged: (v) => _nameQuery = v,
@@ -789,15 +964,15 @@ class _MainScreenState extends State<MainScreen> {
                   const SizedBox(width: 8),
                   ElevatedButton(
                     onPressed: () => _loadByName(_nameQuery),
-                    child: const Text('�̸� �˻�'),
+                    child: const Text('이름 검색'),
                   ),
                 ],
               ),
             ),
 
-            // �߾� ����(��� + ���/��ĳ��): ���� ���� �������� ��� �� flex:1
+            // 중앙 영역(목록 + 결과/바코드스캔): 상단 영역 상대적으로 작게 할 flex:7
             Expanded(
-              flex: 1,
+              flex: 4,
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
@@ -817,22 +992,28 @@ class _MainScreenState extends State<MainScreen> {
                         itemBuilder: (ctx, i) {
                           final h = _rxHeads[i];
                           final no = (h['no'] ?? '').toString();
-                          final name = (h['patient_name'] ?? h['name'] ?? h['ȯ�ڸ�'] ?? '').toString();
-                          final birth = (h['patient_birth'] ?? h['birth_date'] ?? h['�������'] ?? '').toString();
+                          final name = (h['patient_name'] ?? h['name'] ?? h['환자명'] ?? '').toString();
+                          final birth = (h['patient_birth'] ?? h['birth_date'] ?? h['생년월일'] ?? '').toString();
                           final isComplete = asBool(h['is_complete']);
+                          final isSelected = identical(h, _selectedHead);
                           return ListTile(
-                            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                             title: Text('[$no] $name ($birth)', style: const TextStyle(fontSize: 16, height: 1.2)),
-                            selected: identical(h, _selectedHead),
+                            selected: isSelected,
                             tileColor: isComplete ? _getCompleteBgColor() : null,
-                            onTap: () => _onHeadSelected(h),
+                            selectedTileColor: isSelected ? Colors.blue.shade200 : null,
+                            onTap: () {
+                              onHeadSelected(h);
+                              // 항목 선택 후 바코드 입력창에 포커스 복원
+                              _barcodeFocusNode.requestFocus();
+                            },
                           );
                         },
                       ),
                     ),
                   ),
 
-                  // ���� ���/��ĳ��
+                  // 우측 결과/바코드스캔
                   Expanded(
                     flex: 3,
                     child: Container(
@@ -844,7 +1025,7 @@ class _MainScreenState extends State<MainScreen> {
                               onDoubleTap: () {
                                 Clipboard.setData(ClipboardData(text: _resultText));
                                 ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(content: Text('��� �ؽ�Ʈ�� Ŭ�����忡 �����߾��.')),
+                                  const SnackBar(content: Text('결과 텍스트가 클립보드에 복사되었습니다.')),
                                 );
                               },
                               child: Container(
@@ -872,8 +1053,8 @@ class _MainScreenState extends State<MainScreen> {
                             controller: _barcodeController,
                             focusNode: _barcodeFocusNode,
                             decoration: const InputDecoration(
-                              labelText: '���ڵ� ��ĵ',
-                              hintText: '���ڵ带 ��ĵ�ϼ���',
+                              labelText: '바코드 스캔',
+                              hintText: '바코드를 스캔하세요',
                               border: OutlineInputBorder(),
                               prefixIcon: Icon(Icons.qr_code_scanner),
                               isDense: true,
@@ -881,7 +1062,7 @@ class _MainScreenState extends State<MainScreen> {
                             ),
                             onSubmitted: (value) async {
                               if (value.isNotEmpty) {
-                                await _handleBarcode(value);
+                                await handleBarcode(value);
                                 _barcodeController.clear();
                                 _barcodeFocusNode.requestFocus();
                               }
@@ -895,10 +1076,10 @@ class _MainScreenState extends State<MainScreen> {
               ),
             ),
 
-            // �հ�/�и� ����
+            // 집계/분할 영역
             Container(
               margin: const EdgeInsets.symmetric(horizontal: 12),
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
                 color: _pageDesignMode == PageDesignMode.modern 
                     ? const Color(0xFFECEFF1) 
@@ -912,30 +1093,30 @@ class _MainScreenState extends State<MainScreen> {
                     flex: 2,
                     child: Text(
                       _selectedHead == null
-                          ? 'ȯ�ڸ� �����ϼ���'
+                          ? '환자명을 선택하세요'
                           : '${_selectedHead['patient_name'] ?? ''} ${_selectedHead['patient_birth'] ?? ''}',
-                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
                     ),
                   ),
-                  Container(height: 40, width: 1, color: Colors.grey.shade300, margin: const EdgeInsets.symmetric(horizontal: 16)),
+                  Container(height: 32, width: 1, color: Colors.grey.shade300, margin: const EdgeInsets.symmetric(horizontal: 12)),
                   Expanded(
                     flex: 3,
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                       children: [
-                        Column(children: [const Text('��ħ', style: TextStyle(fontWeight: FontWeight.bold)), const SizedBox(height: 4), Text(totals['m'] ?? '0', style: const TextStyle(fontSize: 16))]),
-                        Column(children: [const Text('����', style: TextStyle(fontWeight: FontWeight.bold)), const SizedBox(height: 4), Text(totals['a'] ?? '0', style: const TextStyle(fontSize: 16))]),
-                        Column(children: [const Text('����', style: TextStyle(fontWeight: FontWeight.bold)), const SizedBox(height: 4), Text(totals['e'] ?? '0', style: const TextStyle(fontSize: 16))]),
-                        Column(children: [const Text('��ħ', style: TextStyle(fontWeight: FontWeight.bold)), const SizedBox(height: 4), Text(totals['n'] ?? '0', style: const TextStyle(fontSize: 16))]),
+                        Column(children: [const Text('아침', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)), const SizedBox(height: 2), Text(totals['m'] ?? '0', style: const TextStyle(fontSize: 14))]),
+                        Column(children: [const Text('점심', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)), const SizedBox(height: 2), Text(totals['a'] ?? '0', style: const TextStyle(fontSize: 14))]),
+                        Column(children: [const Text('저녁', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)), const SizedBox(height: 2), Text(totals['e'] ?? '0', style: const TextStyle(fontSize: 14))]),
+                        Column(children: [const Text('자기전', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)), const SizedBox(height: 2), Text(totals['n'] ?? '0', style: const TextStyle(fontSize: 14))]),
                       ],
                     ),
                   ),
-                  Container(height: 40, width: 1, color: Colors.grey.shade300, margin: const EdgeInsets.symmetric(horizontal: 16)),
+                  Container(height: 32, width: 1, color: Colors.grey.shade300, margin: const EdgeInsets.symmetric(horizontal: 12)),
                   Expanded(
                     flex: 2,
                     child: Row(
                       children: [
-                        const Text('�и� ����:', style: TextStyle(fontWeight: FontWeight.bold)),
+                        const Text('분할 번호:', style: TextStyle(fontWeight: FontWeight.bold)),
                         const SizedBox(width: 8),
                         Expanded(
                           child: DropdownButton<int>(
@@ -959,9 +1140,9 @@ class _MainScreenState extends State<MainScreen> {
               ),
             ),
 
-            // RxRecipe ����Ʈ: �� ũ��(central�� �� 2��) �� flex:2
+            // RxRecipe 리스트: 더 크게(central이 더 2배) 할 flex:10
             Expanded(
-              flex: 2,
+              flex: 10,
               child: Container(
                 decoration: BoxDecoration(
                   border: Border.all(color: _getCardBorderColor(), width: 2),
@@ -1000,6 +1181,12 @@ class _MainScreenState extends State<MainScreen> {
                           setState(() => _rxRecipes[i] = updated);
                           _refreshSeparationOptions();
                         }
+                        // 다이얼로그 닫힌 후 바코드 입력창에 포커스 복원
+                        _barcodeFocusNode.requestFocus();
+                      },
+                      onTap: () {
+                        // 단순 클릭 시에도 바코드 입력창 포커스 유지
+                        _barcodeFocusNode.requestFocus();
                       },
                       child: Container(
                         margin: const EdgeInsets.symmetric(vertical: 1),
@@ -1019,7 +1206,7 @@ class _MainScreenState extends State<MainScreen> {
                                   Expanded(
                                     child: Row(
                                       children: [
-                                        // ����
+                                        // 순서
                                         Container(
                                           width: 30,
                                           alignment: Alignment.center,
@@ -1032,7 +1219,7 @@ class _MainScreenState extends State<MainScreen> {
                                             ),
                                           ),
                                         ),
-                                        // üũ/�Ѱ� ����
+                                        // 체크/총량 뱃지
                                         Container(
                                           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                                           decoration: BoxDecoration(
@@ -1050,7 +1237,7 @@ class _MainScreenState extends State<MainScreen> {
                                           ),
                                         ),
                                         const SizedBox(width: 12),
-                                        // �̸�/�ڵ�
+                                        // 이름/코드
                                         Flexible(
                                           child: Text(
                                             name.isEmpty ? code : name,
@@ -1079,7 +1266,7 @@ class _MainScreenState extends State<MainScreen> {
                                       ],
                                     ),
                                   ),
-                                  // Location ǥ�� (������)
+                                  // Location 표시 (오른쪽)
                                   if (location.isNotEmpty) ...[
                                     Container(
                                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -1108,7 +1295,7 @@ class _MainScreenState extends State<MainScreen> {
                                 ],
                               ),
                               const SizedBox(height: 2),
-                              // Ĩ ���� �ؽ�Ʈ ������ ����(Theme override)
+                              // 칩들의 텍스트 색상도 조정(Theme override)
                               Theme(
                                 data: Theme.of(context).copyWith(
                                   textTheme: Theme.of(context).textTheme.apply(
@@ -1129,6 +1316,7 @@ class _MainScreenState extends State<MainScreen> {
             ),
           ],
         ),
+      ),
       ),
     );
   }

@@ -8,6 +8,7 @@
 #include <sapi.h>
 
 #include "win32_window.h"
+#include "com_port_handler.h"
 
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
@@ -33,8 +34,17 @@ class FlutterWindow : public Win32Window {
   // Global TTS voice instance
   ISpVoice* tts_voice_ = nullptr;
   
+  // COM Port handler instance
+  std::unique_ptr<ComPortHandler> com_port_handler_;
+  
   // Setup TTS platform channel
   void SetupTtsChannel();
+  
+  // Setup Window platform channel
+  void SetupWindowChannel();
+  
+  // Setup COM Port platform channel
+  void SetupComPortChannel();
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

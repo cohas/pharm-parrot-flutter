@@ -16,6 +16,9 @@ FlutterWindow::FlutterWindow(const flutter::DartProject& project)
   // Initialize COM and create TTS voice
   CoInitialize(nullptr);
   CoCreateInstance(CLSID_SpVoice, nullptr, CLSCTX_ALL, IID_ISpVoice, (void**)&tts_voice_);
+  
+  // Initialize COM Port handler
+  com_port_handler_ = std::make_unique<ComPortHandler>();
 }
 
 FlutterWindow::~FlutterWindow() {
@@ -46,6 +49,12 @@ bool FlutterWindow::OnCreate() {
   
   // Setup TTS platform channel
   SetupTtsChannel();
+  
+  // Setup Window platform channel
+  SetupWindowChannel();
+  
+  // Setup COM Port platform channel
+  SetupComPortChannel();
   
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
@@ -145,6 +154,97 @@ void FlutterWindow::SetupTtsChannel() {
             }
           }
           result->Error("INVALID_ARGUMENT", "Frequency and duration required");
+        } else {
+          result->NotImplemented();
+        }
+      });
+}
+
+void FlutterWindow::SetupWindowChannel() {
+  auto channel = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(),
+      "com.example.pharm_parrot_flutter/window",
+      &flutter::StandardMethodCodec::GetInstance());
+
+  channel->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+         std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+        if (call.method_name() == "setWindowGeometry") {
+          const auto* arguments = std::get_if<flutter::EncodableMap>(call.arguments());
+          if (arguments) {
+            auto left_it = arguments->find(flutter::EncodableValue("left"));
+            auto top_it = arguments->find(flutter::EncodableValue("top"));
+            auto width_it = arguments->find(flutter::EncodableValue("width"));
+            auto height_it = arguments->find(flutter::EncodableValue("height"));
+            
+            if (left_it != arguments->end() && 
+                top_it != arguments->end() && 
+                width_it != arguments->end() && 
+                height_it != arguments->end()) {
+              
+              int left = std::get<int>(left_it->second);
+              int top = std::get<int>(top_it->second);
+              int width = std::get<int>(width_it->second);
+              int height = std::get<int>(height_it->second);
+              
+              HWND hwnd = GetHandle();
+              if (hwnd) {
+                SetWindowPos(hwnd, nullptr, left, top, width, height, SWP_NOZORDER);
+                result->Success();
+                return;
+              }
+            }
+          }
+          result->Error("INVALID_ARGUMENT", "Window geometry parameters required");
+        } else {
+          result->NotImplemented();
+        }
+      });
+}
+
+void FlutterWindow::SetupComPortChannel() {
+  auto channel = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(),
+      "com.example.pharm_parrot_flutter/comport",
+      &flutter::StandardMethodCodec::GetInstance());
+
+  channel->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+         std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+        if (call.method_name() == "openComPort") {
+          const auto* arguments = std::get_if<flutter::EncodableMap>(call.arguments());
+          if (arguments) {
+            auto port_it = arguments->find(flutter::EncodableValue("portNumber"));
+            auto baud_it = arguments->find(flutter::EncodableValue("baudRate"));
+            
+            if (port_it != arguments->end() && baud_it != arguments->end()) {
+              int port_number = std::get<int>(port_it->second);
+              int baud_rate = std::get<int>(baud_it->second);
+              
+              bool success = com_port_handler_->OpenComPort(port_number, baud_rate);
+              result->Success(success);
+              return;
+            }
+          }
+          result->Error("INVALID_ARGUMENT", "Port number and baud rate required");
+        } else if (call.method_name() == "closeComPort") {
+          com_port_handler_->CloseComPort();
+          result->Success();
+        } else if (call.method_name() == "readComPort") {
+          std::string data = com_port_handler_->GetLineData();
+          result->Success(data);
+        } else if (call.method_name() == "writeComPort") {
+          const auto* arguments = std::get_if<flutter::EncodableMap>(call.arguments());
+          if (arguments) {
+            auto data_it = arguments->find(flutter::EncodableValue("data"));
+            if (data_it != arguments->end()) {
+              std::string data = std::get<std::string>(data_it->second);
+              bool success = com_port_handler_->WriteData(data);
+              result->Success(success);
+              return;
+            }
+          }
+          result->Error("INVALID_ARGUMENT", "Data required");
         } else {
           result->NotImplemented();
         }
