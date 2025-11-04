@@ -1,0 +1,554 @@
+﻿import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import '../services/supabase_service.dart';
+import '../widgets/patient_drug_dialog.dart';
+
+num asNum(dynamic v, [num def = 0]) {
+  if (v == null) return def;
+  if (v is num) return v;
+  if (v is String) {
+    return num.tryParse(v.trim()) ?? def;
+  }
+  return def;
+}
+
+bool asBool(dynamic v, [bool def = false]) {
+  if (v == null) return def;
+  if (v is bool) return v;
+  if (v is num) return v != 0;
+  if (v is String) {
+    final s = v.trim().toLowerCase();
+    if (s == 'true' || s == '1') return true;
+    if (s == 'false' || s == '0') return false;
+  }
+  return def;
+}
+
+String fmtNum(num v) {
+  final n = v is double ? double.parse(v.toStringAsFixed(2)) : v;
+  if (n is int || (n is double && n == n.roundToDouble())) return n.round().toString();
+  return NumberFormat('0.##').format(n);
+}
+
+class MainScreen extends StatefulWidget {
+  const MainScreen({super.key});
+
+  @override
+  State<MainScreen> createState() => _MainScreenState();
+}
+
+class _MainScreenState extends State<MainScreen> {
+  late final SupabaseService _sb;
+
+  DateTime _selectedDate = DateTime.now();
+  String _nameQuery = '';
+  String _patientNumber = '';
+
+  List<dynamic> _rxHeads = [];
+  List<dynamic> _rxRecipes = [];
+  dynamic _selectedHead;
+
+  String _resultText = '';
+  Color _resultColor = Colors.grey.shade300;
+
+  final List<int> _separationOptions = [];
+  int _selectedSeparation = 0; // 0 means none
+
+  @override
+  void initState() {
+    super.initState();
+    _sb = SupabaseService(Supabase.instance.client);
+    unawaited(_loadByDate(_selectedDate));
+  }
+
+  void _setResult(String msg, {bool error = false}) {
+    setState(() {
+      _resultText = '[${DateFormat('HH:mm:ss').format(DateTime.now())}] $msg';
+      _resultColor = error ? Colors.redAccent.shade100 : Colors.grey.shade300;
+    });
+  }
+
+  Future<void> _pickDateAutoOk() async {
+    final picked = await showDialog<DateTime>(
+      context: context,
+      builder: (ctx) {
+        DateTime temp = _selectedDate;
+        return Localizations.override(
+          context: ctx,
+          locale: const Locale('ko'),
+          child: AlertDialog(
+            contentPadding: EdgeInsets.zero,
+            content: SizedBox(
+              width: 360,
+              child: CalendarDatePicker(
+                initialDate: _selectedDate,
+                firstDate: DateTime(2020),
+                lastDate: DateTime(2100),
+                onDateChanged: (d) {
+                  temp = d;
+                  Navigator.of(ctx).pop(temp); // 날짜 선택 즉시 적용
+                },
+              ),
+            ),
+          ),
+        );
+      },
+    );
+    if (picked != null) {
+      setState(() => _selectedDate = picked);
+      unawaited(_loadByDate(picked));
+    }
+  }
+
+  Future<void> _loadByDate(DateTime date) async {
+    try {
+      final d = DateFormat('yyyy-MM-dd').format(date);
+      final resp = await _sb.rpc('select_rxhead_bydate', {'_selected_date': d});
+      final list = (resp as List?) ?? [];
+
+      setState(() {
+        _rxHeads = list;
+        _rxRecipes = [];
+      });
+
+      if (_rxHeads.isNotEmpty) {
+        _onHeadSelected(_rxHeads.first);
+        _setResult('처방 ${_rxHeads.length}건 로드 완료 ($d).');
+      } else {
+        _setResult('해당 날짜($d)에 처방이 없습니다.');
+      }
+    } catch (e) {
+      _setResult('RxHead 조회 실패: $e', error: true);
+    }
+  }
+
+  Future<void> _loadByPatientNumber(String pid) async {
+    if (pid.trim().isEmpty) return;
+    try {
+      final resp = await _sb.rpc('select_rxhead_by_patient_number', {'_patient_number': pid.trim()});
+      final list = (resp as List?) ?? [];
+      setState(() {
+        _rxHeads = list;
+        _rxRecipes = [];
+      });
+      if (_rxHeads.isNotEmpty) {
+        _onHeadSelected(_rxHeads.first);
+        _setResult('환자번호($pid)로 ${_rxHeads.length}건.');
+      } else {
+        _setResult('환자번호($pid) 조회 결과 없음.');
+      }
+    } catch (e) {
+      _setResult('환자번호로 RxHead 조회 실패: $e', error: true);
+    }
+  }
+
+  Future<void> _loadByName(String name) async {
+    if (name.trim().isEmpty) return;
+    try {
+      final resp = await _sb.rpc('select_rxhead_by_name', {'_patient_name': name.trim()});
+      final list = (resp as List?) ?? [];
+      setState(() {
+        _rxHeads = list;
+        _rxRecipes = [];
+      });
+      if (_rxHeads.isNotEmpty) {
+        _onHeadSelected(_rxHeads.first);
+        _setResult('이름($name)으로 ${_rxHeads.length}건.');
+      } else {
+        _setResult('이름($name) 조회 결과 없음.');
+      }
+    } catch (e) {
+      _setResult('이름으로 RxHead 조회 실패: $e', error: true);
+    }
+  }
+
+  Future<void> _loadRecipesByTfn(num tfn) async {
+    try {
+      final resp = await _sb.rpc('select_rxrecipe_by_textfile_number', {'_textfile_number': tfn});
+      final list = (resp as List?) ?? [];
+      setState(() {
+        _rxRecipes = list;
+      });
+      _refreshSeparationOptions();
+      setState(() {}); // totals 재계산
+    } catch (e) {
+      _setResult('RxRecipe 조회 실패: $e', error: true);
+    }
+  }
+
+  void _onHeadSelected(dynamic row) {
+    setState(() {
+      _selectedHead = row;
+    });
+    final tfn = asNum(row['tfn']); // DB: tfn
+    unawaited(_loadRecipesByTfn(tfn));
+  }
+
+  Future<void> _completeHead() async {
+    final headId = (_selectedHead != null) ? (_selectedHead['rxhead_id']?.toString() ?? '') : '';
+    if (headId.isEmpty) return;
+    try {
+      await _sb.rpc('update_rxhead_complete', {'_rxhead_id': headId});
+      await _loadByDate(_selectedDate);
+      _setResult('처방 완료 처리되었습니다.');
+    } catch (e) {
+      _setResult('완료 처리 실패: $e', error: true);
+    }
+  }
+
+  void _refreshSeparationOptions() {
+    _separationOptions
+      ..clear()
+      ..addAll(
+        _rxRecipes
+            .where((e) => asBool(e['use'], false))
+            .map((e) => asNum(e['seperate'], -999).toInt())
+            .where((v) => v != -999)
+            .toSet()
+            .toList()
+          ..sort(),
+      );
+
+    if (_separationOptions.isEmpty) {
+      _selectedSeparation = 0;
+    } else if (!_separationOptions.contains(_selectedSeparation)) {
+      _selectedSeparation = _separationOptions.first;
+    }
+  }
+
+  Map<String, String> _calculateTotals() {
+    num m = 0, a = 0, e = 0, n = 0;
+    for (final it in _rxRecipes) {
+      if (!asBool(it['use'], true)) continue;
+      if (_selectedSeparation != 0 &&
+          asNum(it['seperate'], -999).toInt() != _selectedSeparation) continue;
+
+      final typeCode = (it['Type']?.toString() ?? it['T']?.toString() ?? '').trim(); // DB: "Type"
+      final isPill = typeCode.toUpperCase() == 'T';
+
+      num vm = asNum(it['morning']);
+      num va = asNum(it['afternoon']);
+      num ve = asNum(it['evening']);
+      num vn = asNum(it['night']);
+      if (isPill) {
+        vm = vm.ceil();
+        va = va.ceil();
+        ve = ve.ceil();
+        vn = vn.ceil();
+      }
+      m += vm; a += va; e += ve; n += vn;
+    }
+    return {
+      'm': fmtNum(m),
+      'a': fmtNum(a),
+      'e': fmtNum(e),
+      'n': fmtNum(n),
+    };
+  }
+
+  Widget _buildKeyValueChips(Map<String, dynamic> data) {
+    final keys = data.keys.map((k) => k.toString()).toList()..sort();
+    return Wrap(
+      spacing: 8,
+      runSpacing: 6,
+      children: [
+        for (final k in keys)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: Colors.grey.shade100,
+              border: Border.all(color: Colors.grey.shade300),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              '$k: ${data[k] ?? ''}',
+              style: const TextStyle(fontSize: 12),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final totals = _calculateTotals();
+
+    // DB: select_rxhead_by_* => keys: patient_name, patient_birth, pid, tfn, rxhead_id, complete ...
+    final patientLabel = _selectedHead == null
+        ? '환자를 선택하세요'
+        : '${_selectedHead['patient_name'] ?? ''} ${_selectedHead['patient_birth'] ?? ''}';
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('PharmParrot')),
+      body: SafeArea(
+        child: Column(
+          children: [
+            // Top filters
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: InkWell(
+                      onTap: _pickDateAutoOk, // 날짜 선택 즉시 적용
+                      child: Container(
+                        height: 48,
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        alignment: Alignment.centerLeft,
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.grey.shade400),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(DateFormat('yyyy-MM-dd').format(_selectedDate)),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      decoration: const InputDecoration(
+                        border: OutlineInputBorder(),
+                        labelText: '이름',
+                        isDense: true,
+                      ),
+                      onChanged: (v) => _nameQuery = v,
+                      onSubmitted: (v) => _loadByName(v),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    onPressed: () => _loadByName(_nameQuery),
+                    child: const Text('이름검색'),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      decoration: const InputDecoration(
+                        border: OutlineInputBorder(),
+                        labelText: '환자번호',
+                        isDense: true,
+                      ),
+                      onChanged: (v) => _patientNumber = v,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    onPressed: () => _loadByPatientNumber(_patientNumber),
+                    child: const Text('번호검색'),
+                  ),
+                ],
+              ),
+            ),
+
+            // Patient label + complete button
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      patientLabel,
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton.tonal(
+                    onPressed: _completeHead,
+                    child: const Text('처방완료'),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+
+            // RxHead + Right totals/separation
+            Expanded(
+              child: Row(
+                children: [
+                  // RxHead list
+                  Expanded(
+                    flex: 3,
+                    child: Container(
+                      margin: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey.shade400),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: ListView.separated(
+                        itemCount: _rxHeads.length,
+                        separatorBuilder: (_, __) => const Divider(height: 1),
+                        itemBuilder: (ctx, i) {
+                          final h = _rxHeads[i];
+                          final name = (h['patient_name'] ?? '').toString();
+                          final pid = (h['pid'] ?? '').toString();
+                          final birth = (h['patient_birth'] ?? '').toString();
+                          final tfn = (h['tfn'] ?? '').toString();
+                          return ListTile(
+                            title: Text('$name ($pid)'),
+                            subtitle: Text('TFN: $tfn   생년월일: $birth'),
+                            selected: identical(h, _selectedHead),
+                            onTap: () => _onHeadSelected(h),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                  // Right panel: totals + separation + result
+                  Expanded(
+                    flex: 2,
+                    child: Padding(
+                      padding: const EdgeInsets.all(12.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          const Text('투여 총량', style: TextStyle(fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 8),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text('아침'),
+                              Text(totals['m'] ?? '0'),
+                            ],
+                          ),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text('점심'),
+                              Text(totals['a'] ?? '0'),
+                            ],
+                          ),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text('저녁'),
+                              Text(totals['e'] ?? '0'),
+                            ],
+                          ),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text('취침'),
+                              Text(totals['n'] ?? '0'),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                          const Text('분리 선택'),
+                          DropdownButton<int>(
+                            isExpanded: true,
+                            value: _separationOptions.contains(_selectedSeparation)
+                                ? _selectedSeparation
+                                : (_separationOptions.isNotEmpty ? _separationOptions.first : 0),
+                            items: _separationOptions
+                                .map((e) => DropdownMenuItem(value: e, child: Text(e.toString())))
+                                .toList(),
+                            onChanged: (v) {
+                              if (v == null) return;
+                              setState(() => _selectedSeparation = v);
+                            },
+                          ),
+                          const SizedBox(height: 12),
+                          Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: _resultColor,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              _resultText,
+                              maxLines: 6,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            // RxRecipe list
+            Expanded(
+              child: Container(
+                margin: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey.shade400),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: ListView.separated(
+                  itemCount: _rxRecipes.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (ctx, i) {
+                    final r = _rxRecipes[i];
+
+                    // 🔑 이름 키 매핑 (SQL에 별칭 없을 때 대비)
+                    // 추천: SQL에서 `substring(p.product_name,1,18) AS product_name`로 별칭 주세요!
+                    final name = (r['product_name'] ??
+                            r['상품명'] ??
+                            r['제품명'] ??
+                            r['?column?'] ?? // substring 결과 기본키
+                            '')
+                        .toString();
+
+                    final code = (r['pack_barcode'] ?? r['Code'] ?? '').toString(); // 바코드가 사실상 식별자
+                    final checkedV = asNum(r['checked_amount'] ?? r['Checked']).toInt(); // DB: checked_amount
+                    final totalV = asNum(r['Total']).toInt(); // DB: "Total"
+                    final use = asBool(r['use'], true);
+
+                    return InkWell(
+                      onTap: () async {
+                        final updated = await showDialog(
+                          context: context,
+                          builder: (_) => PatientDrugDialog(
+                            supabase: _sb,
+                            patientId: (_selectedHead?['pid'] ?? '').toString(),
+                            row: Map<String, dynamic>.from(r as Map),
+                          ),
+                        );
+                        if (updated is Map<String, dynamic>) {
+                          setState(() => _rxRecipes[i] = updated);
+                          _refreshSeparationOptions();
+                        }
+                      },
+                      child: Opacity(
+                        opacity: use ? 1.0 : 0.5,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      name.isEmpty ? code : name,
+                                      style: const TextStyle(fontWeight: FontWeight.w600),
+                                    ),
+                                  ),
+                                  const Icon(Icons.edit, size: 18),
+                                ],
+                              ),
+                              const SizedBox(height: 4),
+                              Text('Code: $code   $checkedV/$totalV',
+                                  style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                              const SizedBox(height: 8),
+                              _buildKeyValueChips(Map<String, dynamic>.from(r as Map)),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
